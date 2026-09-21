@@ -1,6 +1,7 @@
 import re
 import threading
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 from discord.ext import voice_recv
@@ -15,12 +16,19 @@ def safe_name(name: str) -> str:
     return cleaned[:40] or "anvandare"
 
 
+@dataclass
+class Track:
+    name: str
+    seconds: float
+    path: Path
+
+
 class Recorder:
     def __init__(self, folder: Path):
         self.folder = folder
         self.folder.mkdir(parents=True, exist_ok=True)
         self.sink = voice_recv.BasicSink(self._write)
-        self._tracks: dict[str, tuple[str, wave.Wave_write]] = {}
+        self._tracks: dict[str, tuple[str, Path, wave.Wave_write]] = {}
         self._lock = threading.Lock()
         self._closed = False
 
@@ -38,19 +46,20 @@ class Recorder:
                 else:
                     display = "Okänd"
                     filename = "okand.wav"
-                writer = wave.open(str(self.folder / filename), "wb")
+                path = self.folder / filename
+                writer = wave.open(str(path), "wb")
                 writer.setnchannels(CHANNELS)
                 writer.setsampwidth(SAMPLE_WIDTH)
                 writer.setframerate(SAMPLE_RATE)
-                self._tracks[key] = (display, writer)
-            self._tracks[key][1].writeframes(data.pcm)
+                self._tracks[key] = (display, path, writer)
+            self._tracks[key][2].writeframes(data.pcm)
 
-    def close(self) -> list[tuple[str, float]]:
+    def close(self) -> list[Track]:
         with self._lock:
             self._closed = True
             results = []
-            for display, writer in self._tracks.values():
+            for display, path, writer in self._tracks.values():
                 seconds = writer.getnframes() / SAMPLE_RATE
                 writer.close()
-                results.append((display, seconds))
+                results.append(Track(display, seconds, path))
             return results

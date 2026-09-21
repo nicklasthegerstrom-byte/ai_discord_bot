@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -5,13 +6,33 @@ import discord
 from discord import app_commands
 from discord.ext import commands, voice_recv
 
-from bot.services.recorder import Recorder
+from bot.services.recorder import Recorder, Track
+from bot.services.summarize import summarize
+from bot.services.transcribe import transcribe
 
 RECORDINGS_DIR = Path(__file__).resolve().parents[2] / "recordings"
+MIN_SECONDS = 1.0
+MAX_MESSAGE = 1900
 
 
 def format_time(seconds: float) -> str:
     return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+def split_message(text: str) -> list[str]:
+    return [text[i:i + MAX_MESSAGE] for i in range(0, len(text), MAX_MESSAGE)] or [""]
+
+
+def save_transcripts(folder: Path, transcripts: dict[str, str]) -> None:
+    if not transcripts:
+        return
+    body = "\n\n".join(f"## {name}\n{text}" for name, text in transcripts.items())
+    (folder / "transkript.txt").write_text(body, encoding="utf-8")
+
+
+def remove_audio(track: Track) -> None:
+    track.path.unlink(missing_ok=True)
+    track.path.with_suffix(".mp3").unlink(missing_ok=True)
 
 
 class Standup(commands.Cog):
@@ -69,11 +90,49 @@ class Standup(commands.Cog):
         if not tracks:
             await interaction.followup.send("Inspelningen stoppad, men jag hörde ingen prata.")
             return
-        lines = [f"- {name}: {format_time(seconds)}" for name, seconds in tracks]
+        lines = [f"- {track.name}: {format_time(track.seconds)}" for track in tracks]
         await interaction.followup.send(
-            f"Inspelningen stoppad. Sparade {len(tracks)} ljudspår i `{recorder.folder.name}`:\n"
+            f"Inspelningen stoppad. Jag hörde {len(tracks)} personer prata:\n"
             + "\n".join(lines)
+            + "\n\nTranskriberar och sammanfattar..."
         )
+
+        transcribable = [track for track in tracks if track.seconds >= MIN_SECONDS]
+        results = await asyncio.gather(
+            *(transcribe(track.path) for track in transcribable),
+            return_exceptions=True,
+        )
+        transcripts: dict[str, str] = {}
+        failed_paths: set[Path] = set()
+        for track, result in zip(transcribable, results):
+            if isinstance(result, Exception):
+                failed_paths.add(track.path)
+                await interaction.followup.send(
+                    f"Transkriberingen av {track.name} misslyckades: {result}. "
+                    f"Ljudfilen ligger kvar i `{recorder.folder.name}`."
+                )
+                continue
+            if result.strip():
+                transcripts[track.name] = result.strip()
+
+        save_transcripts(recorder.folder, transcripts)
+        for track in tracks:
+            if track.path not in failed_paths:
+                remove_audio(track)
+
+        if not transcripts:
+            await interaction.followup.send("Ingen text att sammanfatta.")
+            return
+        try:
+            summary = await summarize(transcripts)
+        except Exception as exc:
+            await interaction.followup.send(
+                f"Sammanfattningen misslyckades: {exc}. Transkriptet finns sparat i `{recorder.folder.name}`."
+            )
+            return
+        for i, chunk in enumerate(split_message(summary)):
+            header = "**Sammanfattning av standup**\n\n" if i == 0 else ""
+            await interaction.followup.send(header + chunk)
 
 
 async def setup(bot: commands.Bot):
