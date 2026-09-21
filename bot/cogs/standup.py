@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -130,9 +131,35 @@ class Standup(commands.Cog):
                 f"Sammanfattningen misslyckades: {exc}. Transkriptet finns sparat i `{recorder.folder.name}`."
             )
             return
-        for i, chunk in enumerate(split_message(summary)):
-            header = "**Sammanfattning av standup**\n\n" if i == 0 else ""
-            await interaction.followup.send(header + chunk)
+        (recorder.folder / "sammanfattning.txt").write_text(summary, encoding="utf-8")
+        await self.post_summary(interaction, summary, recorder.folder.name)
+
+    async def post_summary(self, interaction: discord.Interaction, summary: str, folder_name: str):
+        raw = os.environ.get("SUMMARY_CHANNEL_ID", "").strip()
+        channel = self.bot.get_channel(int(raw)) if raw.isdigit() else None
+        if raw and channel is None:
+            await interaction.followup.send(
+                f"Hittar inte kanalen som anges i SUMMARY_CHANNEL_ID. Sammanfattningen finns sparad i `{folder_name}`."
+            )
+            return
+
+        chunks = split_message(summary)
+        heading = f"**Sammanfattning av standup {datetime.now():%Y-%m-%d}**\n\n"
+        if channel is None or channel.id == interaction.channel_id:
+            for i, chunk in enumerate(chunks):
+                await interaction.followup.send((heading if i == 0 else "") + chunk)
+            return
+
+        try:
+            for i, chunk in enumerate(chunks):
+                await channel.send((heading if i == 0 else "") + chunk)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"Jag får inte posta i {channel.mention}. Kontrollera botens behörigheter där. "
+                f"Sammanfattningen finns sparad i `{folder_name}`."
+            )
+            return
+        await interaction.followup.send(f"Sammanfattningen är postad i {channel.mention}.")
 
 
 async def setup(bot: commands.Bot):
